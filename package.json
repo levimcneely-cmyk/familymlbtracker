@@ -1,0 +1,13 @@
+{
+  "name": "familymlbtracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Family MLB tracker (static site + scheduled data job)",
+  "scripts": {
+    "test": "node tests/run.js",
+    "update-data": "node scripts/update-data.js data-out"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.0"
+  }
+}

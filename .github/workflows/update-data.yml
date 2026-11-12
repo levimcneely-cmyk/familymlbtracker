@@ -1,0 +1,38 @@
+name: Update MLB data
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'      # GitHub may run this a few minutes late; the page falls back to MLB directly
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-data
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Load previous data (if the data branch exists)
+        run: |
+          git clone --depth 1 --branch data "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data-out || mkdir data-out
+          rm -rf data-out/.git
+      - name: Fetch from MLB
+        run: node scripts/update-data.js data-out
+      - name: Publish to the data branch
+        run: |
+          cd data-out
+          git init -q -b data
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Update data $(date -u +%FT%TZ)"
+          git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data
