@@ -262,6 +262,38 @@
     text-overflow: ellipsis;
   }
   .opp-logo { height: 14px; width: 14px; object-fit: contain; vertical-align: -3px; margin-right: 4px; }
+  .card-badge:empty { display: none; }
+  .card-badge.pen { padding: 0.7rem 1.25rem 0; }
+  .pennant {
+    display: inline-flex;
+    align-items: center;
+    height: 26px;
+    padding: 0 26px 0 12px;
+    background: linear-gradient(90deg, #c8102e, #8f0b22);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    clip-path: polygon(0 0, 100% 22%, 100% 78%, 0 100%);
+  }
+  .champ-banner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 0.55rem 1rem;
+    background: linear-gradient(90deg, #8a6a00 0%, #ffd23c 28%, #fff3b0 50%, #ffd23c 72%, #8a6a00 100%);
+    color: #1b1400;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    text-align: center;
+  }
+  .team-card.champion { box-shadow: 0 0 0 2px #ffd23c, 0 6px 28px rgba(255, 210, 60, 0.28); }
+  .lb-tag { font-size: 9px; font-weight: 700; letter-spacing: 0.08em; color: #fff; background: #c8102e; border-radius: 4px; padding: 1px 5px; vertical-align: 1px; }
   .res-w { color: #7ee08a; }
   .res-l { color: #ff8a80; }
 
@@ -385,7 +417,7 @@
 
 <div class="legend">
   <span class="legend-star">★</span>
-  <span>leading among the family's teams (lowest wins for RA)</span>
+  <span>leads the family (lowest wins for RA) · cards sorted by ★, ties by MLB rank</span>
 </div>
 
 <div class="bottom-bar">
@@ -616,7 +648,7 @@ async function loadStandings(ctx) {
         gb: e.divisionGamesBack != null ? e.divisionGamesBack : e.gamesBack,
         streak: e.streak && e.streak.streakCode,
         l10: l10 ? `${l10.wins}-${l10.losses}` : null,
-        rd: e.runDifferential, runsScored: e.runsScored, runsAllowed: e.runsAllowed,
+        rd: e.runDifferential, runsScored: e.runsScored, runsAllowed: e.runsAllowed, sportRank: e.sportRank,
       };
     }
   }
@@ -671,6 +703,15 @@ function pickGames(games) {
   return { live, last, next };
 }
 
+/* World Series status from a team's postseason games: pennant for finalists, champion at 4 wins. */
+function worldSeriesInfo(games) {
+  const w = games.filter(g => g.type === 'W' && !/postpone|cancel/i.test(g.detailed));
+  if (!w.length) return null;
+  const done = w.filter(g => g.abstract === 'Final' && g.my != null && g.their != null);
+  const wins = done.filter(g => g.my > g.their).length, losses = done.filter(g => g.my < g.their).length;
+  return { wins, losses, over: wins >= 4 || losses >= 4, champion: wins >= 4, season: w[0].season };
+}
+
 async function loadTeamSchedule(t, ctx, light, prev) {
   const today = ctx.today;
   const win = await fetchGames(t.id, addDays(today, -14), addDays(today, 30), true);
@@ -680,7 +721,19 @@ async function loadTeamSchedule(t, ctx, light, prev) {
   if (light) {                                  // quick live-score refresh: keep older last/next if the window has none
     if (!out.last && prev) out.last = prev.last;
     if (!out.next && prev) out.next = prev.next;
+    out.ws = prev ? prev.ws : null;
     return out;
+  }
+  // Postseason picture (World Series) and a reliable "last game" once the regular season is over.
+  if (ctx.phase !== 'regular') {
+    try {
+      const s = ctx.statsSeason;
+      const post = await fetchGames(t.id, `${s}-09-20`, `${s}-12-15`, false);
+      out.ws = worldSeriesInfo(post);
+      if (!out.last) out.last = pickGames(post).last;
+    } catch (e) { out.ws = prev ? prev.ws : null; }
+  } else {
+    out.ws = null;
   }
   // Last game fell outside the window (offseason, or eliminated a while ago): look back through the stats season.
   if (!out.last && ctx.phase !== 'regular') {
@@ -854,9 +907,13 @@ function rankTeams(model, leaders) {
   const counts = Object.fromEntries(TEAMS.map(t => [t.abbr, 0]));
   STAT_DEFS.forEach(d => (leaders[d.key] || []).forEach(a => counts[a]++));
   return TEAMS.map(t => {
-    const st = model[t.abbr].st;
-    return { t, cats: counts[t.abbr], pct: st ? (parseFloat(st.pct) || 0) : 0, st };
-  }).sort((a, b) => b.cats - a.cats || b.pct - a.pct);
+    const st = model[t.abbr].st, sc = model[t.abbr].sc;
+    return { t, cats: counts[t.abbr], pct: st ? (parseFloat(st.pct) || 0) : 0, st, ws: sc && sc.ws, sportRank: st && st.sportRank ? Number(st.sportRank) : null };
+  }).sort((a, b) => {
+    if (b.cats !== a.cats) return b.cats - a.cats;                                   // most stars first
+    if (a.sportRank != null && b.sportRank != null && a.sportRank !== b.sportRank) return a.sportRank - b.sportRank;   // tie -> better MLB rank
+    return b.pct - a.pct;                                                            // fallback: win%
+  });
 }
 
 /* ================================================================
@@ -873,7 +930,7 @@ function maybeSaveHistory() {
   for (const t of TEAMS) {
     const m = model[t.abbr];
     if (!m.st || m.noGames || m.runs == null || m.homeRuns == null || m.strikeouts == null) return;   // incomplete: don't save
-    teams[t.abbr] = { owner: t.owner, name: t.name, wins: m.st.wins, losses: m.st.losses, runs: m.runs, homeRuns: m.homeRuns, stolenBases: m.stolenBases, strikeouts: m.strikeouts, runsAllowed: m.runsAllowed };
+    teams[t.abbr] = { owner: t.owner, name: t.name, wins: m.st.wins, losses: m.st.losses, runs: m.runs, homeRuns: m.homeRuns, stolenBases: m.stolenBases, strikeouts: m.strikeouts, runsAllowed: m.runsAllowed, ws: m.sc && m.sc.ws ? (m.sc.ws.champion ? 'champion' : 'finalist') : null };
   }
   const order = rankTeams(model, computeLeaders(model)).map(r => r.t.abbr);
   const hist = store.get(LS.history, {}) || {};
@@ -890,6 +947,7 @@ function buildCards() {
     const cells = STAT_DEFS.map(d => `<div class="stat-cell" id="${d.idp}-cell-${a}"><div class="stat-num" id="${d.idp}-${a}">—</div><div class="stat-lbl">${d.label}</div></div>`).join('');
     return `
   <div class="team-card skeleton" id="card-${a}" style="--g1:${t.g1};--g2:${t.g2};--accent:${t.accent};--stat:${t.stat}">
+    <div class="card-badge" id="badge-${a}"></div>
     <div class="card-header">
       <div class="logo-circle" id="logo-${a}"><img src="${logoUrl(t.id)}" alt="${esc(t.name)} logo"></div>
       <div class="card-identity">
@@ -930,7 +988,7 @@ function oppHTML(g) {
   const meta = TEAM_META[g.oppId];
   const short = (meta && meta.short) || g.oppName || '?';
   const full = (meta && meta.name) || g.oppName || short;
-  return `<span title="${esc(full)}"><img class="opp-logo" src="${logoUrl(g.oppId)}" alt="" onerror="this.remove()">${g.isHome ? 'vs' : '@'} ${esc(short)}</span>`;
+  return `<span title="${esc(full)}">${g.isHome ? 'vs' : '@'} <img class="opp-logo" src="${logoUrl(g.oppId)}" alt="" onerror="this.remove()">${esc(short)}</span>`;
 }
 
 function renderTeam(t, m, ctx) {
@@ -945,12 +1003,29 @@ function renderTeam(t, m, ctx) {
   const chips = [];
   if (st && !m.noGames) {
     if (st.divRank) chips.push(`<span class="chip">${ordinal(st.divRank)} ${esc(DIVISIONS[st.divId] || '')}</span>`);
+    if (st.sportRank) chips.push(`<span class="chip">MLB #${esc(st.sportRank)}</span>`);
     if (st.gb != null && st.gb !== '-' && st.gb !== '0.0' && Number(st.divRank) !== 1) chips.push(`<span class="chip">${esc(st.gb)} GB</span>`);
     if (st.streak) chips.push(`<span class="chip ${/^W/.test(st.streak) ? 'res-w' : 'res-l'}">${esc(st.streak)}</span>`);
     if (st.l10) chips.push(`<span class="chip">L10 ${esc(st.l10)}</span>`);
     if (st.rd != null) chips.push(`<span class="chip">RD ${st.rd > 0 ? '+' : ''}${st.rd}</span>`);
   }
   setHTML('meta-' + a, chips.join(''));
+
+  // World Series pennant / champion banner
+  const ws = m.sc && m.sc.ws;
+  const badge = $('badge-' + a), card = $('card-' + a);
+  card.classList.toggle('champion', !!(ws && ws.champion));
+  if (ws && ws.champion) {
+    badge.className = 'card-badge champ';
+    badge.innerHTML = `<div class="champ-banner"><span>🏆</span><span>${esc(ws.season || ctx.statsSeason)} World Series Champions</span><span>🏆</span></div>`;
+  } else if (ws) {
+    const txt = ws.over ? `${ws.season || ctx.statsSeason} World Series · Runner-Up` : `World Series · ${ws.wins}–${ws.losses}`;
+    badge.className = 'card-badge pen';
+    badge.innerHTML = `<span class="pennant">${esc(txt)}</span>`;
+  } else {
+    badge.className = 'card-badge';
+    badge.innerHTML = '';
+  }
 
   // Live game strip
   const sc = m.sc, live = sc && sc.live;
@@ -1004,16 +1079,16 @@ function renderLeaderboard(model, leaders, ctx) {
   const over = ctx.phase === 'after' || ctx.phase === 'before';
   const anyLeaders = STAT_DEFS.some(d => (leaders[d.key] || []).length);
   const title = over ? `Final ${ctx.statsSeason} Standings` : 'Family Leaderboard';
-  let html = `<div class="lb-title"><h2>${esc(title)}</h2><small>★ = categories led</small></div>`;
+  let html = `<div class="lb-title"><h2>${esc(title)}</h2><small>★ = categories led · ties go to MLB rank</small></div>`;
   if (!anyLeaders) {
     html += `<div class="lb-empty">Waiting for the season to get going — nobody leads a category yet.</div>`;
   } else {
-    if (over) html += `<div class="lb-champ">🏆 ${esc(ranked[0].t.owner.replace(/'s Team$/, ''))} wins ${ctx.statsSeason}</div>`;
+    if (over) html += `<div class="lb-champ">👑 ${esc(ranked[0].t.owner.replace(/'s Team$/, ''))} wins the family title for ${ctx.statsSeason}</div>`;
     html += ranked.map((r, i) => `
       <div class="lb-row${i === 0 ? ' first' : ''}">
         <span class="lb-rank">${i + 1}</span>
         <img class="lb-logo" src="${logoUrl(r.t.id)}" alt="" onerror="this.style.visibility='hidden'">
-        <span class="lb-owner">${esc(r.t.owner.replace(/'s Team$/, ''))} <span class="lb-rec">· ${esc(r.t.abbr)}</span></span>
+        <span class="lb-owner">${esc(r.t.owner.replace(/'s Team$/, ''))} <span class="lb-rec">· ${esc(r.t.abbr)}</span>${r.ws ? (r.ws.champion ? ' 🏆' : ' <span class="lb-tag">WS</span>') : ''}</span>
         <span class="lb-rec">${r.st ? `${r.st.wins}-${r.st.losses}` : '—'}</span>
         <span class="lb-stars">★ ${r.cats}</span>
       </div>`).join('');
@@ -1033,7 +1108,7 @@ function renderHistory() {
     const h = hist[s];
     const rows = (h.order || Object.keys(h.teams)).filter(a => h.teams[a]).map((a, i) => {
       const x = h.teams[a];
-      return `<tr class="${i === 0 ? 'champ' : ''}"><td>${i === 0 ? '🏆 ' : ''}${esc(x.owner.replace(/'s Team$/, ''))} · ${esc(a)}</td><td>${x.wins}-${x.losses}</td><td>${fmtNum(x.runs)}</td><td>${fmtNum(x.homeRuns)}</td><td>${fmtNum(x.stolenBases)}</td><td>${fmtNum(x.strikeouts)}</td><td>${fmtNum(x.runsAllowed)}</td></tr>`;
+      return `<tr class="${i === 0 ? 'champ' : ''}"><td>${i === 0 ? '👑 ' : ''}${esc(x.owner.replace(/'s Team$/, ''))} · ${esc(a)}${x.ws === 'champion' ? ' 🏆' : x.ws === 'finalist' ? ' <span class="lb-tag">WS</span>' : ''}</td><td>${x.wins}-${x.losses}</td><td>${fmtNum(x.runs)}</td><td>${fmtNum(x.homeRuns)}</td><td>${fmtNum(x.stolenBases)}</td><td>${fmtNum(x.strikeouts)}</td><td>${fmtNum(x.runsAllowed)}</td></tr>`;
     }).join('');
     return `<div class="hist-season"><h3>${esc(s)} Season</h3><table class="hist"><tr><th>Team</th><th>W-L</th><th>R</th><th>HR</th><th>SB</th><th>K</th><th>RA</th></tr>${rows}</table></div>`;
   }).join('') + `<div class="hist-actions"><button class="small" type="button" id="hist-copy">Copy backup</button><span id="hist-msg">Saved on this device/browser only.</span></div>`;
@@ -1095,6 +1170,10 @@ function render() {
     renderTeam(t, model[t.abbr], ctx);
     STAT_DEFS.forEach(d => $(`${d.idp}-cell-${t.abbr}`).classList.toggle('leader', (leaders[d.key] || []).includes(t.abbr)));
   });
+  const ranked = rankTeams(model, leaders);
+  const cont = $('cards');
+  const want = ranked.map(r => 'card-' + r.t.abbr).join();
+  if (want !== Array.from(cont.children).map(c => c.id).join()) ranked.forEach(r => cont.appendChild($('card-' + r.t.abbr)));
   renderLeaderboard(model, leaders, ctx);
   renderHistory();
   renderBanner();
